@@ -1,0 +1,126 @@
+---
+title: "ML course project"
+author: "Jen Villwock"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+    ```
+    
+
+## Notes of the data
+
+There are some variables where the vast majority of the rows are missing data for them. I think we can delete those really or not include them in the model since they don't seem to add much information that I can see. Also, the inclusion of all variables initially was causing problems for the ml functions. 
+```{r}
+
+training <- training %>% 
+  mutate(classe = factor(classe)) %>% 
+  select(user_name, roll_belt, roll_arm, roll_dumbbell, roll_forearm, pitch_arm, pitch_belt, pitch_dumbbell, pitch_forearm, yaw_belt, yaw_arm, yaw_dumbbell, yaw_forearm, total_accel_arm, total_accel_belt, total_accel_dumbbell, total_accel_forearm, classe)
+
+```
+
+## Model building and tuning
+
+After looking at the data I've decided to go with a random forest model. This algorithm is an ensemble of decision trees and is useful for complex classification problems with high-dimensional data. It is accurate and robust against missing data and outliers with are present in this data. 
+
+
+Building a model and splitting the training and testing data
+Going to go with a bootstrap resampling 
+```{r}
+library(tidymodels)
+
+set.seed(123)
+data_split <- initial_split(training, strata = classe)
+training_d <- training(data_split)
+testing_d <- testing(data_split)
+
+set.seed(234)
+bootrs <- bootstraps(training, strata = classe)
+bootrs
+```
+
+
+Ranger random forest tuning and model specifications
+```{r}
+library(textrecipes)
+
+ranger_recipe <- 
+  recipe(formula = classe ~ ., data = training_d) 
+
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger") 
+
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+
+set.seed(82275)
+doParallel::registerDoParallel()
+ranger_tune <-
+  tune_grid(ranger_workflow, resamples = bootrs, grid = 10)
+
+```
+
+Taking a look at the best results from the training data tuning
+```{r}
+show_best(ranger_tune, metric = "roc_auc")
+show_best(ranger_tune, metric = "accuracy")
+
+autoplot(ranger_tune)
+```
+
+Finalized workflow with best performing parameters
+```{r}
+final_rf <- ranger_workflow %>%
+  finalize_workflow(select_best(ranger_tune))
+
+final_rf
+```
+
+
+The function last_fit() fits this finalized random forest one last time to the training data and evaluates one last time on the testing data.
+```{r}
+rf_fit <- last_fit(final_rf, data_split)
+rf_fit
+```
+
+
+Looking at the metrics of the modeling fit on the testing data.
+Also, the code below is used for predictions on the testing data. 
+```{r}
+collect_metrics(rf_fit)
+
+# We can use the trained workflow from ikea_fit for prediction, or save it to use later.
+predict(rf_fit$.workflow[[1]], testing_d[15, ])
+# Predicting the classes for the testing data provided from the instructors
+predict(rf_fit$.workflow[[1]], testing[20, ])
+```
+
+
+Code below is to examine feature importance. For my model it would appear roll_forearm was an important feature. 
+```{r}
+library(vip)
+
+imp_spec <- ranger_spec %>%
+  finalize_model(select_best(ranger_tune)) %>%
+  set_engine("ranger", importance = "permutation")
+
+workflow() %>%
+  add_recipe(ranger_recipe) %>%
+  add_model(imp_spec) %>%
+  fit(training_d) %>%
+  pull_workflow_fit() %>%
+  vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
+```
+
